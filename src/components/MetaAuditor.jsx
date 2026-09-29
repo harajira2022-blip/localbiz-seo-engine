@@ -30,11 +30,82 @@ export default function MetaAuditor() {
   const [form, setForm] = useState({ url: '', title: '', description: '' })
   const [pages, setPages] = useState([])
   const [filter, setFilter] = useState('all')
+  const [fetching, setFetching] = useState(false)
+  const [fetchError, setFetchError] = useState('')
 
   const liveCheck = useMemo(() => evaluate(form.title, form.description), [form.title, form.description])
 
   function update(field, value) {
     setForm((prev) => ({ ...prev, [field]: value }))
+  }
+
+    async function handleFetchUrl() {
+    setFetchError('')
+    const raw = form.url.trim()
+    if (!raw) {
+      setFetchError('Enter a URL first')
+      return
+    }
+
+    let target
+    try {
+      target = new URL(raw).toString()
+    } catch {
+      setFetchError("That doesn't look like a valid URL (include https://)")
+      return
+    }
+
+    // Public CORS proxies: browsers usually can't fetch other websites
+    // directly (CORS security rule), so we route the request through a
+    // free proxy service that fetches the page on our behalf and hands
+    // back the raw HTML. This is the "automation" step: the app reads
+    // the page itself instead of the user pasting values in.
+    // Free proxies are unreliable individually, so we try a few in a
+    // row and use whichever responds first — a small robustness layer
+    // documented as a stand-in for a real backend fetch service.
+    const proxies = [
+      `https://api.allorigins.win/raw?url=${encodeURIComponent(target)}`,
+      `https://corsproxy.io/?url=${encodeURIComponent(target)}`,
+      `https://thingproxy.freeboard.io/fetch/${target}`,
+    ]
+
+    setFetching(true)
+    let html = null
+
+    for (const proxyUrl of proxies) {
+      try {
+        const res = await fetch(proxyUrl)
+        if (!res.ok) continue
+        const text = await res.text()
+        if (text && text.length > 50) {
+          html = text
+          break
+        }
+      } catch {
+        // try the next proxy
+      }
+    }
+
+    if (!html) {
+      setFetchError(
+        'Could not fetch that page through any proxy — the page may block automated requests, or all free proxies are busy right now. You can still type the fields in manually.'
+      )
+      setFetching(false)
+      return
+    }
+
+    const doc = new DOMParser().parseFromString(html, 'text/html')
+    const title = doc.querySelector('title')?.textContent?.trim() || ''
+    const description =
+      doc.querySelector('meta[name="description"]')?.getAttribute('content')?.trim() || ''
+
+    setForm((prev) => ({ ...prev, title, description }))
+
+    if (!title && !description) {
+      setFetchError('Fetched the page, but it has no <title> or meta description tag')
+    }
+
+    setFetching(false)
   }
 
   function handleAdd(e) {
@@ -43,7 +114,7 @@ export default function MetaAuditor() {
 
     const result = evaluate(form.title, form.description)
     const entry = {
-      id: crypto.randomUUID ? crypto.randomUUID() : String(Date.now()),
+      id: crypto.randomUUID ? crypto.randomUUID() : `${Date.now()}-${Math.random().toString(36).slice(2)}`,
       url: form.url.trim(),
       title: form.title.trim(),
       description: form.description.trim(),
@@ -51,6 +122,7 @@ export default function MetaAuditor() {
     }
     setPages((prev) => [entry, ...prev])
     setForm({ url: '', title: '', description: '' })
+    setFetchError('')
   }
 
   function removePage(id) {
@@ -72,7 +144,7 @@ export default function MetaAuditor() {
 
   const titleClass = form.title.length > TITLE_LIMIT ? 'warn' : ''
   const descClass = !form.description.trim()
-    ? ''
+    ? 'err'
     : form.description.length > DESC_LIMIT
     ? 'err'
     : ''
@@ -82,18 +154,31 @@ export default function MetaAuditor() {
       <section className="panel">
         <h2>Audit a page</h2>
         <p className="hint">
-          Paste in a page's URL, title tag, and meta description. The badge below updates live as you type.
+          Paste a page's URL and click Fetch to automatically pull its title and description — or
+          type them in yourself. The badge below updates live as you type.
         </p>
 
         <form onSubmit={handleAdd}>
           <div className="field">
             <label htmlFor="url">Page URL</label>
-            <input
-              id="url"
-              value={form.url}
-              onChange={(e) => update('url', e.target.value)}
-              placeholder="https://example.com/menu"
-            />
+            <div style={{ display: 'flex', gap: 8 }}>
+              <input
+                id="url"
+                style={{ flex: 1 }}
+                value={form.url}
+                onChange={(e) => update('url', e.target.value)}
+                placeholder="https://example.com/menu"
+              />
+              <button
+                type="button"
+                className="btn-secondary"
+                onClick={handleFetchUrl}
+                disabled={fetching}
+              >
+                {fetching ? 'Fetching…' : 'Fetch'}
+              </button>
+            </div>
+            {fetchError && <div className="char-count err">{fetchError}</div>}
           </div>
 
           <div className="field">
@@ -179,7 +264,11 @@ export default function MetaAuditor() {
                     {p.issues.length === 0 ? '—' : p.issues.map((i) => i.text).join('; ')}
                   </td>
                   <td>
-                    <button className="remove-btn" onClick={() => removePage(p.id)}>
+                    <button
+                      className="remove-btn"
+                      aria-label={`Remove ${p.url}`}
+                      onClick={() => removePage(p.id)}
+                    >
                       Remove
                     </button>
                   </td>
